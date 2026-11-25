@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+work/
+.playwright-cli/
+
+# Local machine pointers and indexes; never commit
+.records-vault.json
+memo-index.json
+default-vault.json

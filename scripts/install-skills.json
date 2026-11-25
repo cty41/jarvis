@@ -1,0 +1,20 @@
+{
+  "defaultSkills": [
+    "audio-transcribe",
+    "brainstorming",
+    "eli5",
+    "grill-me",
+    "grilling",
+    "knowledge-maintenance",
+    "life-knowledge",
+    "manual-qa-handoff",
+    "memo-inbox",
+    "plan-plain",
+    "project-doc-organization",
+    "skill-writing"
+  ],
+  "compatSkills": [
+    "make-dev-plan",
+    "plan-mode-plan-writer"
+  ]
+}
