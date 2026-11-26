@@ -54,7 +54,7 @@ pwsh -File scripts/install-user.ps1 -Scope User -IncludeCompat
 pwsh -File scripts/install-user.ps1 -Scope Project -ProjectRoot <project>
 ```
 
-安装器是幂等的：不会覆盖真实目录或指向其他 checkout 的链接；`-Remove` 只删除本 checkout 拥有的链接，不会卸载用户自己的技能或笔记库。若曾经用 `-IncludeCompat` 安装过别名，之后的默认安装不会剪掉这些仍指向本仓库的兼容链接。
+安装器是幂等的：不会覆盖真实目录或指向其他 checkout 的链接；`-Remove` 只删除名单中名称且精确指向本 checkout 对应技能的有效链接；未知自建别名、冲突目标、真实目录和断链均保留，不按“目标在 checkout 内”推断所有权。普通安装不自动清理未知名称；冲突返回非零与 conflict 事件，不声称全部成功。若曾经用 `-IncludeCompat` 安装过别名，之后的默认安装不会剪掉这些仍指向本仓库的兼容链接。
 
 默认集合和兼容名单见 `scripts/install-skills.json`。当前没有 lite / 工程 / 本地工具等额外命令开关；若只想装 lite 5 项，请审阅后手动链接对应目录，或等待后续安装配置。
 
@@ -98,6 +98,6 @@ pwsh -File scripts/test-install-user.ps1
 
 ## 许可
 
-本仓库提取出的材料以 [MIT License](LICENSE) 授权，版权声明为 cty41。`eli5` 改编自 [DreambigOu/ELI5](https://github.com/DreambigOu/ELI5)，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。`life-knowledge/kit/LICENSE` 随 kit 保留。
+本仓库提取出的材料以 [MIT License](LICENSE) 授权，自有部分版权声明为 cty41；第三方部分保留各自版权与许可。部分通用方法最初从作者的 `tactics` 项目移植。`brainstorming` 为 obra/superpowers 的翻译改编，`eli5` 改编自 [DreambigOu/ELI5](https://github.com/DreambigOu/ELI5)，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。`life-knowledge/kit/LICENSE` 随 kit 保留。
 
 个人笔记、健康记录和其他本地数据不适用本许可，也不得并入本仓库或随本仓库分发。

@@ -17,8 +17,9 @@
     still point into this checkout.
 
     The installer is idempotent and never replaces a real directory/file or a
-    link owned by another checkout. It only repairs or prunes links whose targets
-    are inside this checkout. -Remove still removes every checkout-owned link
+    link owned by another checkout. It preserves unknown aliases and conflicting/broken links. -Remove only removes
+    known manifest names whose exact target matches this checkout; no broad prune.
+    It removes those recognized links
     in the selected roots (include -IncludeClaude to remove Claude-root links).
 #>
 [CmdletBinding()]
@@ -50,12 +51,24 @@ function Get-NormalizedPath {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
 }
 
-function Test-PathInsideCheckout {
-    param([Parameter(Mandatory)][string]$Path)
-    $candidate = Get-NormalizedPath $Path
-    $root = Get-NormalizedPath $repoRoot
-    $comparison = if (Test-WindowsLike) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
-    return $candidate.Equals($root, $comparison) -or $candidate.StartsWith($root + [System.IO.Path]::DirectorySeparatorChar, $comparison)
+function Test-OwnedSkillLink {
+    param([string]$Name,[string]$Target)
+    if ($knownPackSkills -cnotcontains $Name) { return $false }
+    $expected = Get-NormalizedPath (Join-Path $repoRoot $Name)
+    $comparison = if (Test-WindowsLike) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    return $Target.Equals($expected, $comparison) -and (Test-Path -LiteralPath $Target -PathType Container)
+}
+
+function Assert-UnlinkedAncestors {
+    param([string]$Path)
+    $cursor = Get-NormalizedPath $Path
+    while ($cursor) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Linked installation root/ancestor refused: $cursor" }
+        $parent = Split-Path -Parent $cursor
+        if (-not $parent -or $parent -eq $cursor) { break }
+        $cursor = $parent
+    }
 }
 
 function Add-Event {
@@ -156,6 +169,9 @@ try {
     $base = if ($Scope -eq 'Project') { $resolvedProjectRoot = Find-ProjectRoot $ProjectRoot; $resolvedProjectRoot } else { $userHome }
     $skillsDirs = Get-SkillTargetRoots -Base $base -ScopeName $Scope -WithClaude ([bool]$IncludeClaude)
 
+    $manifest = Get-InstallManifest
+    $knownPackSkills = @(Get-KnownPackSkillNames -Manifest $manifest)
+    foreach ($root in $skillsDirs) { Assert-UnlinkedAncestors $root }
     if ($Remove) {
         foreach ($skillsDir in $skillsDirs) {
             if (Test-Path -LiteralPath $skillsDir) {
@@ -166,7 +182,7 @@ try {
                     }
                     $rawTarget = ($_.Target -join '')
                     $target = Get-NormalizedPath $rawTarget (Split-Path -Parent $_.FullName)
-                    if (Test-PathInsideCheckout $target) {
+                    if (Test-OwnedSkillLink -Name $_.Name -Target $target) {
                         Add-Event 'remove' $_.Name $_.FullName $target 'checkout-owned link' $skillsDir
                         Remove-SkillLink $_.FullName
                     } else {
@@ -212,23 +228,19 @@ try {
             $existing = $existingByName[$skill.Name]
             if ($existing) {
                 if ($null -eq $existing.LinkType) {
-                    Add-Event 'skip' $skill.Name $linkPath '' 'existing item is not a link' $skillsDir
+                    Add-Event 'conflict' $skill.Name $linkPath '' 'existing item is not a link' $skillsDir
                     continue
                 }
                 $rawTarget = ($existing.Target -join '')
                 $target = Get-NormalizedPath $rawTarget (Split-Path -Parent $existing.FullName)
                 $expected = Get-NormalizedPath $skill.FullName
                 $comparison = if (Test-WindowsLike) { [System.StringComparison]::OrdinalIgnoreCase } else { [System.StringComparison]::Ordinal }
-                if ($target.Equals($expected, $comparison)) {
+                if ($target.Equals($expected, $comparison) -and (Test-Path -LiteralPath $target -PathType Container)) {
                     Add-Event 'keep' $skill.Name $linkPath $target '' $skillsDir
                     continue
                 }
-                if (-not (Test-PathInsideCheckout $target)) {
-                    Add-Event 'skip' $skill.Name $linkPath $target 'link target is outside this checkout' $skillsDir
-                    continue
-                }
-                Add-Event 'fix' $skill.Name $linkPath $target 'checkout-owned target changed' $skillsDir
-                Remove-SkillLink $linkPath
+                Add-Event 'conflict' $skill.Name $linkPath $target 'unowned, changed or broken link preserved' $skillsDir
+                continue
             }
 
             Add-Event 'link' $skill.Name $linkPath $skill.FullName '' $skillsDir
@@ -241,20 +253,13 @@ try {
             }
         }
 
-        if (Test-Path -LiteralPath $skillsDir) {
-            Get-ChildItem -LiteralPath $skillsDir -Force | Where-Object { $null -ne $_.LinkType -and $knownPackSkills -notcontains $_.Name } | ForEach-Object {
-                $rawTarget = ($_.Target -join '')
-                $target = Get-NormalizedPath $rawTarget (Split-Path -Parent $_.FullName)
-                if (Test-PathInsideCheckout $target) {
-                    Add-Event 'prune' $_.Name $_.FullName $target 'stale checkout-owned link' $skillsDir
-                    Remove-SkillLink $_.FullName
-                }
-            }
-        }
+        # Unknown names are never pruned, even when they target this checkout.
     }
+    $conflicts = @($events | Where-Object action -eq 'conflict').Count
 
     $result = [ordered]@{
-        ok = $true
+        ok = ($conflicts -eq 0)
+        conflictCount = $conflicts
         mode = 'install'
         scope = $Scope
         projectRoot = $resolvedProjectRoot
@@ -265,7 +270,8 @@ try {
         skillCount = $skills.Count
         events = @($events)
     }
-    if ($Json) { $result | ConvertTo-Json -Depth 6 } else { Write-Host "`n[done ] $($skills.Count) skill link(s) ensured in $($skillsDirs -join ', ')" -ForegroundColor Green }
+    if ($Json) { $result | ConvertTo-Json -Depth 6 } else { Write-Host "`n[done ] requested=$($skills.Count) conflicts=$conflicts (inspect events)" }
+    if ($conflicts -gt 0) { exit 2 }
     exit 0
 } catch {
     if ($Json) {

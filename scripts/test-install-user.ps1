@@ -78,6 +78,26 @@ try {
     $realDirectory = Join-Path $skillsRoot 'real-directory'
     New-Item -ItemType Directory -Path $realDirectory | Out-Null
 
+    $broken = Join-Path $skillsRoot 'user-broken'
+    New-TestLink $broken (Join-Path $tempRoot 'missing-target')
+    $wrongKnown = Join-Path $skillsRoot 'plan-plain'
+    Remove-TestLink $wrongKnown
+    New-TestLink $wrongKnown (Join-Path $repoRoot 'eli5')
+    $partialText = & $engine -NoProfile -File $installer -Scope Project -ProjectRoot $projectRoot -Json
+    if ($LASTEXITCODE -ne 2) { throw 'Conflicting installation must return partial exit 2.' }
+    $partial = $partialText | ConvertFrom-Json
+    if ($partial.ok -or $partial.conflictCount -lt 2) { throw 'Conflicts were reported as full success.' }
+    if (-not (Test-Path -LiteralPath $staleOwned)) { throw 'Install pruned custom alias.' }
+    if (-not (Get-Item -LiteralPath $broken -Force).LinkType) { throw 'Broken custom alias removed.' }
+    $brokenKnown=Join-Path $skillsRoot 'brainstorming'
+    Remove-TestLink $brokenKnown
+    New-TestLink $brokenKnown (Join-Path $tempRoot 'missing-known-target')
+    $realKnown=Join-Path $skillsRoot 'audio-transcribe'
+    Remove-TestLink $realKnown
+    New-Item -ItemType Directory $realKnown | Out-Null
+    'synthetic user file' | Set-Content (Join-Path $realKnown 'keep.txt')
+    $partialText = & $engine -NoProfile -File $installer -Scope Project -ProjectRoot $projectRoot -Json
+    if ($LASTEXITCODE -ne 2 -or ($partialText | ConvertFrom-Json).ok) { throw 'Known broken/real conflicts must not report success.' }
     $preview = Invoke-InstallerJson @('-Scope', 'Project', '-ProjectRoot', $projectRoot, '-Remove', '-DryRun', '-Json')
     if (-not $preview.ok -or $preview.mode -ne 'remove' -or $preview.removedCount -lt 1) { throw 'Remove dry-run did not report checkout-owned links.' }
     if (-not (Test-Path -LiteralPath (Join-Path $skillsRoot 'grill-me'))) { throw 'Remove dry-run mutated an installed link.' }
@@ -86,10 +106,14 @@ try {
     $removed = Invoke-InstallerJson @('-Scope', 'Project', '-ProjectRoot', $projectRoot, '-Remove', '-Json')
     if (-not $removed.ok -or $removed.mode -ne 'remove' -or $removed.removedCount -lt 1) { throw 'Remove mode did not report removed links.' }
     if (Test-Path -LiteralPath (Join-Path $skillsRoot 'grill-me')) { throw 'Checkout-owned installed link was not removed.' }
-    if (Test-Path -LiteralPath $staleOwned) { throw 'Checkout-owned stale link was not removed.' }
+    if (-not (Test-Path -LiteralPath $wrongKnown)) { throw 'Changed known target was removed.' }
+    if (-not (Get-Item -LiteralPath $broken -Force).LinkType) { throw 'Broken alias was removed.' }
+    if (-not (Test-Path -LiteralPath $staleOwned)) { throw 'User-created alias was removed.' }
     $outsideItem = Get-ChildItem -LiteralPath $skillsRoot -Force | Where-Object Name -eq 'eli5' | Select-Object -First 1
     if (-not $outsideItem -or $null -eq $outsideItem.LinkType) { throw 'Outside-checkout link was removed or replaced.' }
     if (-not (Test-Path -LiteralPath $realDirectory)) { throw 'Real directory was removed.' }
+    if (-not (Get-Item -LiteralPath $brokenKnown -Force).LinkType) { throw 'Known broken link was removed.' }
+    if ((Get-Content (Join-Path $realKnown 'keep.txt') -Raw) -notmatch 'synthetic user file') { throw 'Known real directory changed.' }
 
     $again = Invoke-InstallerJson @('-Scope', 'Project', '-ProjectRoot', $projectRoot, '-Remove', '-Json')
     if (-not $again.ok -or $again.removedCount -ne 0) { throw 'Repeated remove was not idempotent.' }
@@ -98,6 +122,14 @@ try {
     if ($LASTEXITCODE -eq 0) { throw 'Project + IncludeClaude should fail.' }
     $rejectJson = $projectClaudeReject | ConvertFrom-Json
     if ($rejectJson.ok -or ($rejectJson.error -notmatch 'IncludeClaude')) { throw 'Project + IncludeClaude did not report the expected error.' }
+
+    # A linked target-root parent is rejected before any write outside it.
+    $linkedProject=Join-Path $tempRoot 'linked-project'
+    New-Item -ItemType Directory $linkedProject | Out-Null
+    New-TestLink (Join-Path $linkedProject '.agents') $outsideRoot
+    $linkedResult = & $engine -NoProfile -File $installer -Scope Project -ProjectRoot $linkedProject -Json
+    if ($LASTEXITCODE -eq 0 -or ($linkedResult | ConvertFrom-Json).ok) { throw 'Linked installation root should fail.' }
+    if (Test-Path (Join-Path $outsideRoot 'skills')) { throw 'Linked installation root wrote outside.' }
 
     # --- User scope under a fake HOME ---
     $env:HOME = $fakeHome

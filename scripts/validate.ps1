@@ -20,6 +20,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Split-Path -Parent $PSScriptRoot)).Path
 $failures = 0
+$optionalSkips = [Collections.Generic.List[string]]::new()
 
 function Write-Step([string]$Message) { Write-Host "[validate] $Message" }
 function Invoke-Python {
@@ -75,6 +76,7 @@ if ($yamlReady) {
     $ErrorActionPreference = $previousEap
 } else {
     Write-Step 'quick_validate or its pyyaml dependency unavailable; skipped'
+    $optionalSkips.Add('quick_validate unavailable')
 }
 
 # --- 3. relative markdown link check ----------------------------------------
@@ -119,6 +121,7 @@ if (-not $SkipOkf) {
         if ($LASTEXITCODE -ne 0) { $failures++ }
     } else {
         Write-Step 'OKF-lite tests not found; skipped'
+        $optionalSkips.Add('OKF tests missing')
     }
 }
 
@@ -152,7 +155,8 @@ foreach ($skill in $skillDirs) {
 }
 
 if ($failures -eq 0) {
-    Write-Host "[validate] ALL GREEN ($($skillDirs.Count) skills)" -ForegroundColor Green
+    if ($SkipOkf) { $optionalSkips.Add('OKF explicitly skipped') }
+    Write-Host "[validate] COMPLETED failures=0 optional_skips=$($optionalSkips.Count) ($($skillDirs.Count) skills); inspect test-level skips above" -ForegroundColor Green
     exit 0
 } else {
     Write-Host "[validate] FAILED ($failures issue groups)" -ForegroundColor Red

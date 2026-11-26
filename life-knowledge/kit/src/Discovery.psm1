@@ -26,7 +26,7 @@ function Get-KbState {
     }
     $lock = Read-KbJson $lockPath
     $actual = Get-KbFileTreeHash $managedPath
-    if ($lock -and $lock.managedFilesChecksum -and $actual -ne [string]$lock.managedFilesChecksum) {
+    if (-not $lock -or -not $lock.managedFilesChecksum -or $actual -ne [string]$lock.managedFilesChecksum) {
         $issues.Add('Managed files drift detected')
         return [pscustomobject]@{ state='DEGRADED'; vaultPath=$resolvedVault; kitPath=$KitPath; issues=$issues.ToArray() }
     }

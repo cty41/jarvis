@@ -186,7 +186,7 @@ def _parse_inline(text: str, line: int) -> object:
         inner, remainder = _match_flow(text, "[", "]", line)
         if remainder.strip():
             raise YamlParseError(f"line {line}: unexpected content after flow sequence")
-        return [_parse_inline(token, line) for token in _split_flow_tokens(inner, line)]
+        return [] if not inner.strip() else [_parse_inline(token, line) for token in _split_flow_tokens(inner, line)]
     if text[0] == "{":
         inner, remainder = _match_flow(text, "{", "}", line)
         if remainder.strip():

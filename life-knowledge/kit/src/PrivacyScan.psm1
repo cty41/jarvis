@@ -19,13 +19,35 @@ function Invoke-KbPrivacyScan {
     $textExt = @('.md','.txt','.csv','.json','.html','.htm','.xml','.ini','.yaml','.yml','.ps1','.psm1','.py','.lua','.log')
     $findings = [Collections.Generic.List[object]]::new()
     $manual = [Collections.Generic.List[string]]::new()
-    $files = if(Test-Path -LiteralPath $Path -PathType Leaf){@(Get-Item -LiteralPath $Path)}else{@(Get-ChildItem -LiteralPath $Path -Recurse -File -Force)}
+    $readErrors = [Collections.Generic.List[string]]::new()
+    $scanned = 0
+    $enumErrors = @()
+    if (-not (Test-Path -LiteralPath $Path)) {
+        $readErrors.Add('Scan path unavailable')
+        $files = @()
+    } elseif ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        $manual.Add([IO.Path]::GetFullPath($Path))
+        $files=@()
+    } elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $files = @(Get-Item -LiteralPath $Path -Force)
+    } else {
+        # Do not follow reparse directories. Report every link/unknown format.
+        $files = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable enumErrors)
+    }
+    foreach($err in $enumErrors){$readErrors.Add('Directory enumeration incomplete')}
     foreach($file in $files){
-        if($textExt -notcontains $file.Extension.ToLowerInvariant()){
-            if($file.Extension -in @('.pdf','.doc','.docx','.jpg','.jpeg','.png','.zip','.rar','.7z','.db')){$manual.Add($file.FullName)}
+        if($file.Attributes -band [IO.FileAttributes]::ReparsePoint){$manual.Add($file.FullName);continue}
+        if($file.PSIsContainer){continue}
+        if($textExt -notcontains $file.Extension.ToLowerInvariant()){$manual.Add($file.FullName);continue}
+        try {
+            $text = Read-KbScanText $file.FullName
+            if($text.Contains([char]0)){throw 'Binary content in text file'}
+            $lines = @($text -split '\r?\n')
+        } catch {
+            $readErrors.Add("Unreadable or non-text file: $($file.FullName)")
             continue
         }
-        $lines = @(Get-Content -LiteralPath $file.FullName -Encoding UTF8 -ErrorAction SilentlyContinue)
+        $scanned++
         for($i=0;$i -lt $lines.Count;$i++){
             foreach($p in $patterns){
                 $m=[regex]::Match([string]$lines[$i],$p.regex)
@@ -33,7 +55,14 @@ function Invoke-KbPrivacyScan {
             }
         }
     }
-    [pscustomobject]@{findings=$findings.ToArray();manualReview=$manual.ToArray();scannedAt=(Get-Date).ToString('o')}
+    [pscustomobject]@{findings=$findings.ToArray();manualReview=$manual.ToArray();readErrors=$readErrors.ToArray();scannedCount=$scanned;complete=($manual.Count -eq 0 -and $readErrors.Count -eq 0);scannedAt=(Get-Date).ToString('o')}
+
+}
+
+function Read-KbScanText {
+    param([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    return [Text.UTF8Encoding]::new($false,$true).GetString($bytes)
 }
 
 Export-ModuleMember -Function Invoke-KbPrivacyScan,Protect-KbPreview

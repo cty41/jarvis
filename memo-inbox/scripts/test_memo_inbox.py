@@ -57,74 +57,25 @@ class HelperTests(unittest.TestCase):
             mi.parse_instant("2026-11-13T18:00:00")
 
 
-class CreateAndDedupTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.inbox = Path(self.tmp.name) / "inbox"
-        self.inbox.mkdir()
+def legacy_fixture(inbox_root, original=EXAMPLE_TEXT, source=EXAMPLE_SOURCE, reported_at=EXAMPLE_AT, occurred_at=""):
+    # Build historical-format synthetic input; production creation is disabled.
+    key = mi.idempotency_key(original, source)
+    fields = dict(id=mi.make_id(reported_at, key), idempotency_key=key,
+                  source=source, reported_at=reported_at, occurred_at=occurred_at,
+                  status="pending", imported_path="", imported_at="")
+    path = inbox_root / "items" / (fields["id"] + ".md")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(mi.render_item(fields, original), encoding="utf-8")
+    return {"action": "fixture", "item": mi.read_item(path)}
 
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
 
-    def create(self, original: str = EXAMPLE_TEXT, source: str = EXAMPLE_SOURCE, **kwargs: str) -> dict:
-        result = mi.create_item(
-            self.inbox,
-            original=original,
-            source=source,
-            reported_at=kwargs.get("reported_at", EXAMPLE_AT),
-            occurred_at=kwargs.get("occurred_at", ""),
-        )
-        return result
-
-    def test_create_writes_one_file_named_after_id(self) -> None:
-        result = self.create()
-        item = result["item"]
-        self.assertEqual(result["action"], "created")
-        self.assertEqual(item["fields"]["status"], "pending")
-        self.assertEqual(item["original"], EXAMPLE_TEXT)
-        self.assertEqual(item["fields"]["occurred_at"], "")
-        path = Path(item["path"])
-        self.assertEqual(path.name, f"{item['fields']['id']}.md")
-        self.assertEqual(path.parent, self.inbox / "items")
-        self.assertTrue(path.is_file())
-        self.assertEqual(len(list((self.inbox / "items").glob("*.md"))), 1)
-
-    def test_duplicate_message_reuses_the_same_id(self) -> None:
-        first = self.create()
-        second = self.create(original="  周六去图书馆还书\n")
-        self.assertEqual(second["action"], "duplicate")
-        self.assertEqual(first["item"]["fields"]["id"], second["item"]["fields"]["id"])
-        self.assertEqual(len(list((self.inbox / "items").glob("*.md"))), 1)
-
-    def test_same_id_different_text_is_needs_review(self) -> None:
-        first = self.create()
-        target_id = first["item"]["fields"]["id"]
-        other_text = "周日去超市买牛奶"
-        original_make_id = mi.make_id
-        mi.make_id = lambda reported_at, key: target_id
-        try:
-            result = mi.create_item(
-                self.inbox,
-                original=other_text,
-                source="other-source",
-                reported_at=EXAMPLE_AT,
-            )
-        finally:
-            mi.make_id = original_make_id
-        self.assertEqual(result["action"], "conflict")
-        self.assertEqual(result["item"]["fields"]["status"], "needs-review")
-        self.assertEqual(result["item"]["original"], EXAMPLE_TEXT)
-        self.assertIn(other_text, result["item"]["conflicts"])
-        self.assertIn("other-source", result["item"]["conflicts"])
-        self.assertEqual(
-            result["item"]["fields"]["idempotency_key"],
-            first["item"]["fields"]["idempotency_key"],
-        )
-        self.assertEqual(len(list((self.inbox / "items").glob("*.md"))), 1)
-
-    def test_occurred_at_is_stored_when_known(self) -> None:
-        result = self.create(occurred_at="2026-11-14T10:00:00+08:00")
-        self.assertEqual(result["item"]["fields"]["occurred_at"], "2026-11-14T10:00:00+08:00")
+class LegacyCreationRefusedTests(unittest.TestCase):
+    def test_create_is_disabled_without_filesystem_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(mi.ItemError):
+                mi.create_item(root, EXAMPLE_TEXT, EXAMPLE_SOURCE, EXAMPLE_AT)
+            self.assertEqual(list(root.iterdir()), [])
 
 
 class CorrectionAndStatusTests(unittest.TestCase):
@@ -132,7 +83,7 @@ class CorrectionAndStatusTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.inbox = Path(self.tmp.name) / "inbox"
         self.inbox.mkdir()
-        created = mi.create_item(
+        created = legacy_fixture(
             self.inbox,
             original=EXAMPLE_TEXT,
             source=EXAMPLE_SOURCE,
@@ -200,7 +151,7 @@ class ConfigAndVaultTests(unittest.TestCase):
         self.vault.mkdir()
         self.inbox = self.root / "inbox"
         self.inbox.mkdir()
-        created = mi.create_item(
+        created = legacy_fixture(
             self.inbox,
             original=EXAMPLE_TEXT,
             source=EXAMPLE_SOURCE,
@@ -321,35 +272,12 @@ class CliTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_cli_create_validate_show_and_same_entry(self) -> None:
-        created = run(
-            "create",
-            "--inbox-root",
-            str(self.inbox),
-            "--original",
-            EXAMPLE_TEXT,
-            "--source",
-            EXAMPLE_SOURCE,
-            "--reported-at",
-            EXAMPLE_AT,
-        )
-        self.assertEqual(created.returncode, 0, created.stderr)
-        payload = load_stdout(created)
-        self.assertEqual(payload["action"], "created")
-        path = payload["path"]
-        again = run(
-            "create",
-            "--inbox-root",
-            str(self.inbox),
-            "--original",
-            EXAMPLE_TEXT,
-            "--source",
-            EXAMPLE_SOURCE,
-            "--reported-at",
-            EXAMPLE_AT,
-        )
-        self.assertEqual(again.returncode, 0)
-        self.assertEqual(load_stdout(again)["action"], "duplicate")
-        self.assertEqual(load_stdout(again)["id"], payload["id"])
+        created = legacy_fixture(self.inbox)
+        path = str(created["item"]["path"])
+        refused_create = run("create", "--inbox-root", str(self.inbox),
+                             "--original", EXAMPLE_TEXT, "--source", EXAMPLE_SOURCE,
+                             "--reported-at", EXAMPLE_AT)
+        self.assertNotEqual(refused_create.returncode, 0)
 
         validated = run("validate", "--item", path)
         self.assertEqual(validated.returncode, 0, validated.stderr)
@@ -432,7 +360,7 @@ class CliTests(unittest.TestCase):
             "--reported-at",
             EXAMPLE_AT,
         )
-        self.assertEqual(result.returncode, mi.EXIT_USAGE)
+        self.assertNotEqual(result.returncode, 0)
         self.assertFalse(load_stdout(result)["ok"])
 
 
@@ -612,7 +540,7 @@ class WriteMemoTests(unittest.TestCase):
         self.assertNotIn("再记一下", note)
 
     def test_write_memo_from_legacy_item_uses_natural_links(self) -> None:
-        created = mi.create_item(
+        created = legacy_fixture(
             self.inbox,
             original="记一下 周末去图书馆还书",
             source=EXAMPLE_SOURCE,

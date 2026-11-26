@@ -53,7 +53,7 @@ try {
         'scan-private' {
             $scanPath=if($Path){$Path}elseif($vault){$vault}else{throw 'scan-private requires -Path or a configured vault'}
             $scan=Invoke-KbPrivacyScan -Path $scanPath
-            $result=New-KbResult -Command 'scan-private' -Status $(if($scan.findings.Count -eq 0){'ok'}else{'issues'}) -State 'N/A' -VaultPath $vault -Issues $scan.findings -Data @{manualReview=$scan.manualReview}
+            $result=New-KbResult -Command 'scan-private' -Status $(if($scan.findings.Count -eq 0 -and $scan.complete){'ok'}else{'issues'}) -State 'N/A' -VaultPath $vault -Issues $scan.findings -Data @{manualReview=$scan.manualReview;readErrors=$scan.readErrors;scannedCount=$scan.scannedCount;complete=$scan.complete}
         }
         'check-links' {
             if(-not $vault){throw 'Vault not found'}

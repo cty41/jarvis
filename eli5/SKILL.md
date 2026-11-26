@@ -123,3 +123,5 @@ Before responding, verify:
 ## Attribution
 
 Adapted from [DreambigOu/ELI5](https://github.com/DreambigOu/ELI5), MIT License. Upstream version imported: `a766623b062331fdde53467001379b4ddf3acc2f`.
+
+Full upstream license and adaptation notice: [Third-Party Notices](../THIRD_PARTY_NOTICES.md).

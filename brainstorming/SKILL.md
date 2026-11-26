@@ -154,3 +154,9 @@ description: "按需触发：当需求不清晰、需要设计收束时使用—
 - [ ] 仅在用户明确要求时才写入设计文档；如已写入则完成自检并请用户审阅
 - [ ] 未自动提交 Git
 - [ ] 仅在用户明确要求实施计划时才调用 `plan-plain`
+
+## Attribution
+
+Translated and modified from [obra/superpowers](https://github.com/obra/superpowers),
+MIT, Copyright (c) 2025 Jesse Vincent. Pinned comparison source and complete
+license: [Third-Party Notices](../THIRD_PARTY_NOTICES.md).

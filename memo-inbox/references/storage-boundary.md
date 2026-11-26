@@ -14,7 +14,8 @@ or library path defaults that point at a specific person's disk.
   it with `--config-dir`, or with `MEMO_CONFIG_DIR` / `JARVIS_CONFIG_DIR`.
 - A lightweight index (`memo-index.json`) may live in that same config
   directory. It stores technical ids, relative paths, and content hashes
-  only — never memo bodies. It is not an inbox.
+  without a separate body field. Filenames can still disclose memo wording; treat
+  this index as private. It is not an inbox.
 - Sensitive text belongs only in a separate sensitive library, if the user
   has one configured (`records-vault.json` in the same config directory).
   Do not write sensitive or mixed-blocked text to the default library.
@@ -47,3 +48,27 @@ After a write, read the same path back from the notes machine:
 Legacy inbox helpers in the script remain only so a user who already has
 historical drop-box files can update their status after a verified write.
 This pack does not include those files and does not import them automatically.
+
+## Local storage safety
+
+The library root must already exist and be available. Missing roots fail; the
+helper does not create a replacement library or an offline queue. Code repositories,
+skill-pack roots, and existing symlinks/junctions in storage paths are refused for
+notes and indexes. A normal local directory (not a hostile shared filesystem) is
+required; do not move or replace its ancestors while writing.
+
+The index has no separate body field, but `relpath` contains the natural title,
+which can be the entire short memo. JSON output also contains titles and paths.
+Treat the index and captured output/logs as private, just like notes; never commit
+or upload them. A lock serializes helper writes; a stale lock fails closed and
+needs review, never an automatic queue/retry job. If an I/O error follows a note
+write, the note may exist without its index entry: verify before retrying.
+The legacy `create` command is disabled. Only existing leftover files may be
+updated after explicit user authorization; new memos always go directly to the
+configured library and need successful read-back before confirmation.
+
+The config directory also holds `memo-vault-identity.json`, pinning directory
+device/inode identity on first use of an already-existing root. A later mount or
+directory replacement fails until explicitly reviewed; never auto-rebind it.
+First-use identity cannot prove that an arbitrary existing directory is the
+intended mounted library: verify the configured location before first use.

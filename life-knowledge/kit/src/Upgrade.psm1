@@ -4,15 +4,16 @@ Import-Module (Join-Path $PSScriptRoot 'Reports.psm1')
 
 function Invoke-KbUpgrade {
     param([Parameter(Mandatory)][string]$VaultPath,[Parameter(Mandatory)][string]$KitPath,[switch]$DryRun)
+    $VaultPath=Assert-KbStoragePath $VaultPath -MustExist
+    Assert-KbTreeSafe $VaultPath
     $managed=Join-Path $VaultPath '00_System\managed'
     $lockPath=Join-Path $managed 'kit-lock.json'
     if(-not (Test-Path -LiteralPath $lockPath)){throw 'Vault is not linked; run init first.'}
     $lock=Read-KbJson $lockPath
-    $actual=Get-KbFileTreeHash $managed
-    if($lock.managedFilesChecksum -and $actual -ne [string]$lock.managedFilesChecksum){throw 'Managed drift detected; review before upgrade.'}
+    Assert-KbManagedClean $managed
     $changes=@("replace kit-owned files in $managed","preserve runtime data in $managed\runtime-data","preserve user-owned vault content")
     if($DryRun){return (New-KbResult -Command 'upgrade' -Status 'dry-run' -State 'HEALTHY' -VaultPath $VaultPath -Changes $changes)}
-    $backup=Join-Path $VaultPath "00_System\reports\managed-backup-$((Get-Date).ToString('yyyyMMdd-HHmmss'))"
+    $backup=Join-Path $VaultPath "00_System\reports\managed-backup-$([guid]::NewGuid().ToString('N'))"
     Copy-Item -LiteralPath $managed -Destination $backup -Recurse
     Get-ChildItem -LiteralPath $managed -Force | Where-Object {$_.Name -notin @('kit-lock.json','runtime-data')} | Remove-Item -Recurse -Force
     Copy-Item -Path (Join-Path $KitPath 'templates\managed\*') -Destination $managed -Recurse -Force

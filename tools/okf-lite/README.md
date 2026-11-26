@@ -29,3 +29,12 @@ python catalog_impact.py --repo-root DIR sync --worktree --scope <scope> [--scop
 ## 降级项
 
 - 报告与 sync 能力完整保留,无功能降级;仅 YAML loader 支持有限子集(锚点/别名/块标量/多文档流会明确报错)。
+## Write safety
+
+Sync preflights all selected concept files and the log before mutations. Targets
+must remain physically inside the bundle and repository; existing symlinks and
+reparse points are refused. Preview lists exact changed paths. Writes are staged
+under a cooperating-process lock; a replacement failure attempts rollback and
+returns failure (including an explicit incomplete-rollback error if applicable).
+A stale lock requires review, not automatic removal. Use a trusted local
+filesystem; this is not a sandbox against hostile concurrent ancestor replacement.

@@ -4,11 +4,20 @@ Import-Module (Join-Path $PSScriptRoot 'Reports.psm1')
 
 function Invoke-KbInit {
     param([Parameter(Mandatory)][string]$VaultPath,[Parameter(Mandatory)][string]$KitPath,[switch]$DryRun)
-    $vault = [IO.Path]::GetFullPath($VaultPath)
+    $vault = Assert-KbStoragePath $VaultPath
     $managed = Join-Path $vault '00_System\managed'
     $local = Join-Path $vault '00_System\local'
     $reports = Join-Path $vault '00_System\reports'
     $configTarget = Join-Path $vault 'knowledge-config.json'
+    $null = Assert-KbStoragePath (Get-KbProfilePath)
+    if (Test-Path -LiteralPath $vault) { Assert-KbTreeSafe $vault }
+    if (Test-Path -LiteralPath (Join-Path $managed 'kit-lock.json')) {
+        Assert-KbManagedClean $managed
+        return (New-KbResult -Command 'init' -Status $(if($DryRun){'dry-run'}else{'ok'}) -State 'LINKED' -VaultPath $vault -Changes @())
+    }
+    if ((Test-Path -LiteralPath $managed) -and @(Get-ChildItem -LiteralPath $managed -Force).Count -gt 0) {
+        throw 'Unowned managed files found; refusing initialization overwrite.'
+    }
     $changes = [Collections.Generic.List[string]]::new()
     foreach($path in @($vault,$managed,$local,$reports,(Join-Path $vault '10_Inbox'),(Join-Path $vault '20_Projects'),(Join-Path $vault '30_Areas'),(Join-Path $vault '40_Resources'),(Join-Path $vault '90_Archive'))){
         if(-not (Test-Path -LiteralPath $path)){ $changes.Add("create directory $path") }

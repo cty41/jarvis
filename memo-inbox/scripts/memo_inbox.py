@@ -14,6 +14,10 @@ import hashlib
 import json
 import re
 import sys
+import stat
+import time
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -352,7 +356,7 @@ def index_path(config_dir: Path | None = None) -> Path:
 
 
 def load_memo_index(config_dir: Path | None = None) -> dict[str, Any]:
-    path = index_path(config_dir)
+    path = checked_local_path(index_path(config_dir))
     if not path.is_file():
         return {"version": INDEX_VERSION, "items": []}
     try:
@@ -377,6 +381,8 @@ def load_memo_index(config_dir: Path | None = None) -> dict[str, Any]:
             raise ItemError(f"{path} index entries require id, idempotency_key, and relpath")
         if any(forbidden in row for forbidden in ("original", "body", "text", "content")):
             raise ItemError(f"{path} must not store memo text")
+        if Path(str(relpath)).is_absolute() or ".." in Path(str(relpath).replace("\\", "/")).parts:
+            raise ItemError("indexed destination must be inside the vault")
         cleaned.append(
             {
                 "id": str(item_id),
@@ -388,7 +394,7 @@ def load_memo_index(config_dir: Path | None = None) -> dict[str, Any]:
 
 
 def save_memo_index(index: dict[str, Any], config_dir: Path | None = None) -> Path:
-    path = index_path(config_dir)
+    path = checked_local_path(index_path(config_dir))
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": INDEX_VERSION,
@@ -402,9 +408,17 @@ def save_memo_index(index: dict[str, Any], config_dir: Path | None = None) -> Pa
         ],
     }
     encoded = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(encoded, encoding="utf-8", newline="\n")
-    tmp.replace(path)
+    fd, name = tempfile.mkstemp(prefix=".memo-index-", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        checked_local_path(path)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return path
 
 
@@ -586,7 +600,9 @@ def read_item(path: Path) -> dict[str, Any]:
 
 
 def write_item_file(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = checked_local_path(path)
+    if not path.is_file():
+        raise ItemError("refusing to create new legacy inbox items; no offline queue")
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
@@ -615,46 +631,7 @@ def create_item(
     reported_at: str,
     occurred_at: str = "",
 ) -> dict[str, Any]:
-    original = normalize_text(original)
-    source = normalize_text(source)
-    if not original:
-        raise ItemError("original text is required")
-    if not source:
-        raise ItemError("source is required")
-    key = idempotency_key(original, source)
-    item_id = make_id(reported_at, key)
-    existing = find_by_key(inbox_root, key)
-    if existing:
-        return {"action": "duplicate", "item": existing}
-    path = item_path(inbox_root, item_id)
-    if path.exists():
-        current = read_item(path)
-        if normalize_text(current["original"]) == original and current["fields"]["source"] == source:
-            return {"action": "duplicate", "item": current}
-        conflict_block = _append_block(
-            current["conflicts"],
-            reported_at,
-            f"source: {source}\n\n{original}",
-        )
-        fields = dict(current["fields"])
-        fields["status"] = "needs-review"
-        text = render_item(fields, current["original"], current["corrections"], conflict_block)
-        write_item_file(path, text)
-        updated = read_item(path)
-        return {"action": "conflict", "item": updated}
-    fields = {
-        "id": item_id,
-        "idempotency_key": key,
-        "source": source,
-        "reported_at": reported_at,
-        "occurred_at": occurred_at,
-        "status": "pending",
-        "imported_path": "",
-        "imported_at": "",
-    }
-    text = render_item(fields, original)
-    write_item_file(path, text)
-    return {"action": "created", "item": read_item(path)}
+    raise ItemError("refusing to create new legacy inbox items; no offline queue")
 
 
 def _append_block(existing: str, at: str, text: str) -> str:
@@ -739,7 +716,7 @@ def default_config_dir() -> Path:
 
 
 def _read_vault_path(config_dir: Path, filename: str) -> str | None:
-    path = config_dir / filename
+    path = checked_local_path(config_dir / filename)
     if not path.is_file():
         return None
     try:
@@ -765,38 +742,117 @@ def resolve_vaults(config_dir: Path | None = None) -> dict[str, str | None]:
     }
 
 
-def is_skill_pack_checkout(path: Path) -> bool:
-    """Return True if path lives inside a skill-pack checkout.
+def checked_local_path(path: Path) -> Path:
+    """Refuse code/data mixing and existing links, including Windows junctions.
 
-    A checkout is recognized when an ancestor contains memo-inbox/SKILL.md,
-    or when the path itself is the memo-inbox skill directory. This must not
-    depend on a historical inbox/ folder, which public checkouts do not ship.
+    Existing ancestors are checked before any read, mkdir or write. A trusted
+    local filesystem is required: this is not an OS sandbox against a hostile
+    process concurrently replacing directory ancestors.
     """
-    current = path.resolve()
-    for candidate in (current, *current.parents):
-        skill_md = candidate / "SKILL.md"
-        if candidate.name == "memo-inbox" and skill_md.is_file():
-            return True
-        if (candidate / "memo-inbox" / "SKILL.md").is_file():
-            return True
+    absolute = Path(os.path.abspath(path.expanduser()))
+    runtime_pack = Path(__file__).resolve().parents[2]
+    for candidate in (absolute, *absolute.parents):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ItemError("refusing linked or reparse-point storage paths")
+        if (candidate / ".git").exists() or (candidate / ".git").is_symlink() or (candidate / ".hg").exists() or (candidate / ".svn").exists():
+            raise ItemError("refusing skill-pack checkout or code repository storage")
+        if ((candidate / "HEAD").is_file() and (candidate / "objects").is_dir() and (candidate / "refs").is_dir()):
+            raise ItemError("refusing bare code repository storage")
+        if candidate == runtime_pack or (candidate / "SKILL.md").is_file() or (candidate / "scripts" / "install-skills.json").is_file() or (candidate / "memo-inbox" / "SKILL.md").is_file():
+            raise ItemError("refusing skill-pack checkout or code repository storage")
+    return absolute.resolve()
+
+
+def is_skill_pack_checkout(path: Path) -> bool:
+    try:
+        checked_local_path(path)
+    except ItemError:
+        return True
     return False
 
 
+def require_vault(vault_root: Path) -> Path:
+    root = checked_local_path(vault_root)
+    if not root.is_dir():
+        raise ItemError("vault root is missing or unavailable; not saved")
+    return root
+
+
 def safe_dest(vault_root: Path, dest_relpath: str) -> Path:
-    if not dest_relpath or Path(dest_relpath).is_absolute():
+    if not dest_relpath or Path(dest_relpath).is_absolute() or ".." in Path(dest_relpath).parts:
         raise ItemError("destination must be a relative path inside the vault")
-    parts = Path(dest_relpath).parts
-    if ".." in parts or any(part in {".", ""} for part in parts):
-        raise ItemError("destination must be a relative path inside the vault")
-    root = vault_root.resolve()
-    dest = (root / dest_relpath).resolve()
+    root = require_vault(vault_root)
+    dest = checked_local_path(root / dest_relpath)
     try:
         dest.relative_to(root)
     except ValueError as exc:
         raise ItemError("destination must be a relative path inside the vault") from exc
-    if is_skill_pack_checkout(dest) or is_skill_pack_checkout(root):
-        raise ItemError("refusing to write notes into the skill-pack checkout")
     return dest
+
+
+@contextmanager
+def storage_lock(path: Path):
+    """Cross-process fail-closed lock; crashed writers need manual lock review."""
+    path = checked_local_path(path)
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise ItemError("storage busy or stale lock; not saved, review lock before retry")
+            time.sleep(0.02)
+    try:
+        os.close(fd)
+        yield
+    finally:
+        path.unlink()
+
+
+def verify_vault_identity(root: Path, config: Path) -> None:
+    """Pin an existing directory on first use; never silently rebind a mount."""
+    path = checked_local_path(config / "memo-vault-identity.json")
+    identities = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(identities, dict):
+        raise ItemError("invalid vault identity registry; not saved")
+    key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+    info = root.stat()
+    identity = {"device": str(info.st_dev), "inode": str(info.st_ino)}
+    if key in identities:
+        if identities[key] != identity:
+            raise ItemError("vault directory identity changed or mount unavailable; not saved; review before rebinding")
+        return
+    identities[key] = identity
+    fd, name = tempfile.mkstemp(prefix=".memo-identity-", dir=config)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(identities, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        checked_local_path(path)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def write_memo(vault_root: Path, **kwargs: Any) -> dict[str, Any]:
+    root = require_vault(vault_root)
+    config = checked_local_path(Path(kwargs.get("config_dir") or default_config_dir()))
+    # Preflight both roots before creating even a config directory or lock.
+    config.mkdir(parents=True, exist_ok=True)
+    checked_local_path(config)
+    kwargs["config_dir"] = config
+    locks = sorted({root / ".memo-write.lock", config / ".memo-index.lock"}, key=str)
+    with storage_lock(locks[0]), storage_lock(locks[1]):
+        require_vault(root)
+        verify_vault_identity(root, config)
+        return _write_memo_locked(root, **kwargs)
 
 
 def render_vault_note(item: dict[str, Any], mode: str = "original") -> str:
@@ -895,7 +951,7 @@ def find_vault_memo_by_key(
     return None
 
 
-def write_memo(
+def _write_memo_locked(
     vault_root: Path,
     *,
     original: str | None = None,
@@ -935,6 +991,8 @@ def write_memo(
 
     config = Path(config_dir) if config_dir is not None else default_config_dir()
     index = load_memo_index(config)
+    for row in index["items"]:
+        safe_dest(vault_root, row["relpath"])
     mapping = titles_from_index(index)
     if id_to_title:
         mapping.update(id_to_title)
@@ -972,13 +1030,13 @@ def write_memo(
         }
 
     if existing is not None and not relocate:
-        existing_path = vault_root / existing["relpath"]
+        existing_path = safe_dest(vault_root, existing["relpath"])
         if not existing_path.is_file():
             raise ItemError(
                 "indexed memo is missing on disk; refusing to report it as already saved"
             )
         current = existing_path.read_text(encoding="utf-8")
-        if normalize_text(current) != normalize_text(planned["body"]):
+        if normalize_text(current) != normalize_text(planned["body"]) or (not planned["body"].strip() and existing_path.name != planned["filename"]):
             raise ItemError(
                 "indexed memo no longer matches the planned content; refusing to report it as already saved"
             )
@@ -1015,6 +1073,7 @@ def write_memo(
 
 
 def write_vault_note(dest: Path, text: str) -> dict[str, Any]:
+    dest = checked_local_path(dest)
     expected = text.replace("\r\n", "\n")
     if dest.exists():
         current = dest.read_text(encoding="utf-8").replace("\r\n", "\n")
@@ -1022,7 +1081,15 @@ def write_vault_note(dest: Path, text: str) -> dict[str, Any]:
             raise ItemError("destination already exists with different content")
         return {"action": "already-present", "path": str(dest)}
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(expected, encoding="utf-8", newline="\n")
+    checked_local_path(dest)
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(expected)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        raise ItemError("destination already exists; concurrent write, retry after review")
     readback = dest.read_text(encoding="utf-8").replace("\r\n", "\n")
     if normalize_text(readback) != normalize_text(expected):
         raise ItemError("read-back of the written note did not match")
@@ -1335,7 +1402,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deterministic memo-inbox helpers")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    create = sub.add_parser("create", help="Create or deduplicate an inbox item")
+    create = sub.add_parser("create", help="Disabled: no new legacy inbox or offline queue")
     add_inbox_args(create)
     text = create.add_mutually_exclusive_group(required=True)
     text.add_argument("--original", help="Original memo text")
@@ -1415,7 +1482,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ItemError as exc:
+        return fail(str(exc), EXIT_REFUSED)
+    except OSError:
+        return fail("local storage I/O failed; save/index may be incomplete; verify before retry", EXIT_IO)
 
 
 if __name__ == "__main__":

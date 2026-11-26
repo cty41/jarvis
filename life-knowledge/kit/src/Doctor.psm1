@@ -8,6 +8,8 @@ function Invoke-KbDoctor {
     param([string]$VaultPath,[string]$KitPath,[switch]$Quick)
     $state = Get-KbState -VaultPath $VaultPath -KitPath $KitPath
     $issues = [Collections.Generic.List[object]]::new()
+    $privacyComplete=$false
+    $privacyMode=if($Quick){'not-run'}else{'incomplete'}
     foreach($i in $state.issues){$issues.Add($i)}
     if($state.vaultPath -and (Test-Path -LiteralPath $state.vaultPath)){
         foreach($name in @('README.md','AGENTS.md','RULES.md','SKILLS.md')){
@@ -19,11 +21,15 @@ function Invoke-KbDoctor {
         foreach($conflict in $conflicts){$issues.Add("Possible sync conflict file: $($conflict.FullName)")}
         if(-not $Quick){
             $scan = Invoke-KbPrivacyScan -Path $state.vaultPath
+            $privacyComplete=$scan.complete
+            $privacyMode=if($scan.complete){'pattern-scan-complete'}else{'incomplete'}
+            foreach($entry in $scan.manualReview){$issues.Add("Manual privacy review required: $entry")}
+            foreach($entry in $scan.readErrors){$issues.Add($entry)}
             foreach($f in $scan.findings){$issues.Add("Privacy finding [$($f.category)] $($f.file):$($f.line) $($f.preview)")}
         }
     }
     $finalState = if($issues.Count -eq 0 -and $state.state -eq 'HEALTHY'){'HEALTHY'}elseif($state.state -eq 'UNCONFIGURED'){'UNCONFIGURED'}else{'DEGRADED'}
-    New-KbResult -Command 'doctor' -Status $(if($finalState -eq 'HEALTHY'){'ok'}else{'issues'}) -State $finalState -VaultPath $state.vaultPath -Issues $issues.ToArray() -Data @{quick=[bool]$Quick}
+    New-KbResult -Command 'doctor' -Status $(if($finalState -eq 'HEALTHY'){'ok'}else{'issues'}) -State $finalState -VaultPath $state.vaultPath -Issues $issues.ToArray() -Data @{quick=[bool]$Quick;privacyScan=$privacyMode;privacyComplete=$privacyComplete}
 }
 
 Export-ModuleMember -Function Invoke-KbDoctor

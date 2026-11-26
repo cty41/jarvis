@@ -43,7 +43,7 @@ and nothing is written to this repository or to GitHub for a new memo.
 | Compare two copies | `python3 scripts/memo_inbox.py same-entry --a <written> --b <read-back-copy>` |
 | Record leftover inbox status (no new inbox items) | `python3 scripts/memo_inbox.py set-status --item <legacy-file> --status imported --imported-path 备忘/<title>.md --imported-at <ISO instant>` |
 
-The default library path comes from `default-vault.json` field `vaultPath` in the notes machine's config directory (default `~/.config/alfred/` for compatibility with existing local pointers; override with `--config-dir` or `MEMO_CONFIG_DIR`). The sensitive library path comes from `records-vault.json` in the same directory. A lightweight index of technical ids, relative paths, and content hashes lives in the same config directory as `memo-index.json`. It must not store memo bodies, and it is not an inbox. Read that config on the notes machine; do not assume the current checkout can see it. Do not invent a machine-specific path, and do not put machine paths, the index, or library files in this skill or in git.
+The default library path comes from `default-vault.json` field `vaultPath` in the notes machine's config directory (default `~/.config/alfred/` for compatibility with existing local pointers; override with `--config-dir` or `MEMO_CONFIG_DIR`). The sensitive library path comes from `records-vault.json` in the same directory. A lightweight index of technical ids, relative paths, and content hashes lives in the same config directory as `memo-index.json`. It has no separate body field, but relative filenames can disclose the full short memo; treat the index as private. It is not an inbox. Read that config on the notes machine; do not assume the current checkout can see it. Do not invent a machine-specific path, and do not put machine paths, the index, or library files in this skill or in git.
 
 
 Field rules: [references/item-contract.md](references/item-contract.md). Storage boundary: [references/storage-boundary.md](references/storage-boundary.md).
@@ -153,3 +153,27 @@ It does not install a notes-library server or third-party plugin. It does not se
 - [ ] Sensitive text never entered the default library or this repository. If the notes machine was offline, the user was told the text is not yet stored.
 - [ ] No new file was written under this skill-pack checkout. No temporary queue, routine, or scheduled task was created.
 - [ ] Vault files were not added to git.
+
+## Local storage safety
+
+The library root must already exist and be available. Missing roots fail; the
+helper does not create a replacement library or an offline queue. Code repositories,
+skill-pack roots, and existing symlinks/junctions in storage paths are refused for
+notes and indexes. A normal local directory (not a hostile shared filesystem) is
+required; do not move or replace its ancestors while writing.
+
+The index has no separate body field, but `relpath` contains the natural title,
+which can be the entire short memo. JSON output also contains titles and paths.
+Treat the index and captured output/logs as private, just like notes; never commit
+or upload them. A lock serializes helper writes; a stale lock fails closed and
+needs review, never an automatic queue/retry job. If an I/O error follows a note
+write, the note may exist without its index entry: verify before retrying.
+The legacy `create` command is disabled. Only existing leftover files may be
+updated after explicit user authorization; new memos always go directly to the
+configured library and need successful read-back before confirmation.
+
+The config directory also holds `memo-vault-identity.json`, pinning directory
+device/inode identity on first use of an already-existing root. A later mount or
+directory replacement fails until explicitly reviewed; never auto-rebind it.
+First-use identity cannot prove that an arbitrary existing directory is the
+intended mounted library: verify the configured location before first use.

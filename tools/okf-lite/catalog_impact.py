@@ -17,9 +17,11 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import stat
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from okf_yaml import YamlParseError, safe_load
 
@@ -49,6 +51,73 @@ def default_bundle_arg() -> Path:
 def resolve_bundle(repo_root: Path, bundle_arg: Path | None) -> Path:
     bundle = bundle_arg if bundle_arg is not None else default_bundle_arg()
     return bundle if bundle.is_absolute() else repo_root / bundle
+
+
+def contained_target(repo_root: Path, bundle_root: Path, relative: str = "") -> Path:
+    """Validate lexical and physical closure before reading or writing targets."""
+    if relative and (Path(relative).is_absolute() or PureWindowsPath(relative).is_absolute() or ".." in relative.replace("\\", "/").split("/")):
+        raise ValueError("concept/log must be a relative path inside the bundle")
+    repo = repo_root.resolve()
+    lexical_bundle = Path(os.path.abspath(bundle_root))
+    target = lexical_bundle / relative
+    for entry in (target, *target.parents):
+        if entry == repo.parent:
+            break
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("linked/reparse bundle targets are refused")
+    lexical_bundle.resolve().relative_to(repo)
+    target.resolve().relative_to(lexical_bundle.resolve())
+    return target.resolve()
+
+
+def apply_updates(repo: Path, bundle: Path, updates: dict[Path, str]) -> list[str]:
+    """Stage every file before replacement, rollback replaced files on failure.
+
+    The lock covers cooperating helper processes, not hostile filesystem mutation.
+    """
+    lock = contained_target(repo, bundle, ".okf-sync.lock")
+    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    os.close(fd)
+    staged: dict[Path, Path] = {}
+    originals: dict[Path, bytes] = {}
+    replaced: list[Path] = []
+    try:
+        for target, text in updates.items():
+            contained_target(repo, bundle, target.relative_to(bundle).as_posix())
+            originals[target] = target.read_bytes()
+            fd, name = tempfile.mkstemp(prefix=".okf-stage-", dir=target.parent)
+            staged[target] = Path(name)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(name, target.stat().st_mode & 0o777)
+        for target, tmp in staged.items():
+            contained_target(repo, bundle, target.relative_to(bundle).as_posix())
+            if target.read_bytes() != originals[target]:
+                raise ValueError("sync target changed concurrently; retry after review")
+            tmp.replace(target)
+            replaced.append(target)
+        return [p.relative_to(repo).as_posix() for p in replaced]
+    except (OSError, ValueError) as exc:
+        rollback_failed = False
+        for target in reversed(replaced):
+            try:
+                contained_target(repo, bundle, target.relative_to(bundle).as_posix())
+                target.write_bytes(originals[target])
+            except (OSError, ValueError):
+                rollback_failed = True
+        if rollback_failed:
+            raise ValueError("sync failed and rollback incomplete; inspect all selected files") from exc
+        raise ValueError("sync failed; replaced files restored; no success reported") from exc
+    finally:
+        for tmp in staged.values():
+            tmp.unlink(missing_ok=True)
+        lock.unlink()
 
 
 def normalize_path(value: str) -> str:
@@ -102,6 +171,8 @@ def load_catalog(path: Path) -> CatalogConfig:
             raise ValueError(f"{path}: {raw_scope}.concept 必须是非空字符串")
         if not isinstance(patterns, list) or not patterns or any(not isinstance(item, str) for item in patterns):
             raise ValueError(f"{path}: {raw_scope}.paths 必须是非空字符串列表")
+        if Path(concept).is_absolute() or PureWindowsPath(concept).is_absolute() or ".." in concept.replace("\\", "/").split("/"):
+            raise ValueError("concept must stay inside the bundle")
         scopes[raw_scope] = ScopeConfig(
             concept=normalize_path(concept),
             paths=tuple(normalize_path(item) for item in patterns),
@@ -194,7 +265,8 @@ def source_fingerprint(repo_root: Path, scope: str, config: CatalogConfig) -> st
     for path in _repo_files(repo_root):
         if not any(path_matches(path, pattern, config.companion_suffixes) for pattern in scope_config.paths):
             continue
-        content = (repo_root / path).read_bytes()
+        source = contained_target(repo_root, repo_root, path)
+        content = source.read_bytes()
         digest.update(b"\0file\0")
         digest.update(path.encode("utf-8"))
         digest.update(b"\0")
@@ -202,7 +274,7 @@ def source_fingerprint(repo_root: Path, scope: str, config: CatalogConfig) -> st
     return f"sha256:{digest.hexdigest()}"
 
 
-def update_concept_frontmatter(path: Path, timestamp: str, fingerprint: str) -> bool:
+def update_concept_frontmatter(path: Path, timestamp: str, fingerprint: str, *, write: bool = True) -> bool | str:
     original = path.read_text(encoding="utf-8")
     if original.startswith("\ufeff"):
         original = original[1:]
@@ -222,7 +294,7 @@ def update_concept_frontmatter(path: Path, timestamp: str, fingerprint: str) -> 
         None,
     )
     if current_fingerprint == fingerprint:
-        return False
+        return False if write else original
 
     replacements = {
         "timestamp": f'timestamp: "{timestamp}"\n',
@@ -241,13 +313,15 @@ def update_concept_frontmatter(path: Path, timestamp: str, fingerprint: str) -> 
             end_index += 1
 
     updated = "".join(lines)
+    if not write:
+        return updated
     if updated == original:
         return False
     path.write_text(updated, encoding="utf-8", newline="")
     return True
 
 
-def update_log(path: Path, timestamp: str, fingerprints: dict[str, str]) -> bool:
+def update_log(path: Path, timestamp: str, fingerprints: dict[str, str], *, write: bool = True) -> bool | str:
     original = path.read_text(encoding="utf-8")
     if original.startswith("\ufeff"):
         original = original[1:]
@@ -276,6 +350,8 @@ def update_log(path: Path, timestamp: str, fingerprints: dict[str, str]) -> bool
         ]
         lines[heading_index + 1:section_end] = [*additions, *section]
     updated = "\n".join(lines).rstrip() + "\n"
+    if not write:
+        return updated
     if updated == original:
         return False
     path.write_text(updated, encoding="utf-8")
@@ -341,7 +417,12 @@ def main() -> int:
     bundle_root = resolve_bundle(repo_root, args.bundle)
     catalog_path = bundle_root / "catalog-scopes.yaml"
     try:
+        bundle_root = contained_target(repo_root, bundle_root)
+        catalog_path = contained_target(repo_root, bundle_root, "catalog-scopes.yaml")
         config = load_catalog(catalog_path)
+        for entry in config.scopes.values():
+            contained_target(repo_root, bundle_root, entry.concept)
+        contained_target(repo_root, bundle_root, "log.md")
         changed_paths = changed_worktree_paths(repo_root)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"OKF_IMPACT_FAILED: {exc}")
@@ -361,27 +442,26 @@ def main() -> int:
         print("OKF_SYNC_OK scopes=0 changed_files=0")
         return 0
 
-    fingerprints = {
-        scope: source_fingerprint(repo_root, scope, config)
-        for scope in sorted(selected_scopes)
-    }
-    if not args.write:
-        for scope, fingerprint in fingerprints.items():
-            print(f"{scope} {fingerprint} {config.scopes[scope].concept}")
-        print("OKF_SYNC_PREVIEW use --write to update concepts and log")
-        return 0
-
-    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    changed_files: list[str] = []
     try:
+        fingerprints = {scope: source_fingerprint(repo_root, scope, config) for scope in sorted(selected_scopes)}
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        updates: dict[Path, str] = {}
         for scope, fingerprint in fingerprints.items():
-            concept_path = bundle_root / config.scopes[scope].concept
-            if update_concept_frontmatter(concept_path, timestamp, fingerprint):
-                changed_files.append(concept_path.relative_to(repo_root).as_posix())
-        log_path = bundle_root / "log.md"
-        if update_log(log_path, timestamp, fingerprints):
-            changed_files.append(log_path.relative_to(repo_root).as_posix())
-    except (OSError, ValueError) as exc:
+            concept_path = contained_target(repo_root, bundle_root, config.scopes[scope].concept)
+            rendered = update_concept_frontmatter(concept_path, timestamp, fingerprint, write=False)
+            if rendered != concept_path.read_text(encoding="utf-8"):
+                updates[concept_path] = str(rendered)
+        log_path = contained_target(repo_root, bundle_root, "log.md")
+        rendered_log = update_log(log_path, timestamp, fingerprints, write=False)
+        if updates and rendered_log != log_path.read_text(encoding="utf-8"):
+            updates[log_path] = str(rendered_log)
+        if not args.write:
+            for target in updates:
+                print(target.relative_to(repo_root).as_posix())
+            print("OKF_SYNC_PREVIEW use --write to update selected files")
+            return 0
+        changed_files = apply_updates(repo_root, bundle_root, updates) if updates else []
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"OKF_SYNC_FAILED: {exc}")
         return 1
 

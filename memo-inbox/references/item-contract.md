@@ -89,7 +89,7 @@ This is the canonical ordinary-memo file. It is a casual note:
 - The file is plain Markdown. It must not contain YAML frontmatter or template headings such as `## Original`, `## Corrections`, or `## Related`.
 - Leftover related text may be kept as ordinary prose, with wiki links such as `[[title]]` instead of internal ids.
 
-Technical identifiers stay out of the note. The notes machine keeps a lightweight index in the config directory (`memo-index.json`, beside the vault pointers) with only `id`, `idempotency_key`, and `relpath`. The index must not store memo bodies, and it is not an inbox or a second notes library.
+Technical identifiers stay out of the note. The notes machine keeps a lightweight index in the config directory (`memo-index.json`, beside the vault pointers) with only `id`, `idempotency_key`, and `relpath`. There is no separate memo body field, but `relpath` may disclose the whole short memo; this index is private. It is not an inbox or a second notes library.
 
 A later message with the same normalized original text and source is the same memo only if the indexed file still exists and still matches the planned content. If the destination filename already holds different text, or the indexed file is missing or has been edited, do not overwrite and do not report the memo as already saved.
 
@@ -102,3 +102,27 @@ To compare two copies of a current vault note, use normalized file text (and the
 Deterministic checks and writes are in
 [`../scripts/memo_inbox.py`](../scripts/memo_inbox.py). Use it to write a
 memo directly into `备忘/` with a natural title, record a lightweight config-dir index, deduplicate by idempotency key, refuse conflicting overwrites, compare two copies of an entry, resolve local vault paths from config, and (for leftover inbox files only) update import status.
+
+## Local storage safety
+
+The library root must already exist and be available. Missing roots fail; the
+helper does not create a replacement library or an offline queue. Code repositories,
+skill-pack roots, and existing symlinks/junctions in storage paths are refused for
+notes and indexes. A normal local directory (not a hostile shared filesystem) is
+required; do not move or replace its ancestors while writing.
+
+The index has no separate body field, but `relpath` contains the natural title,
+which can be the entire short memo. JSON output also contains titles and paths.
+Treat the index and captured output/logs as private, just like notes; never commit
+or upload them. A lock serializes helper writes; a stale lock fails closed and
+needs review, never an automatic queue/retry job. If an I/O error follows a note
+write, the note may exist without its index entry: verify before retrying.
+The legacy `create` command is disabled. Only existing leftover files may be
+updated after explicit user authorization; new memos always go directly to the
+configured library and need successful read-back before confirmation.
+
+The config directory also holds `memo-vault-identity.json`, pinning directory
+device/inode identity on first use of an already-existing root. A later mount or
+directory replacement fails until explicitly reviewed; never auto-rebind it.
+First-use identity cannot prove that an arbitrary existing directory is the
+intended mounted library: verify the configured location before first use.

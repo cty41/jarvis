@@ -16,7 +16,7 @@ function Invoke-KbNewProject {
 
 function Invoke-KbIngest {
     param([Parameter(Mandatory)][string]$VaultPath,[Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][string]$Target,[switch]$DryRun)
-    if(-not (Test-Path -LiteralPath $Source)){throw "Source not found: $Source"}
+    Assert-KbTreeSafe $Source
     $targetFull=Assert-KbPathWithin $VaultPath (Join-Path $VaultPath $Target)
     $changes=@("copy $Source -> $targetFull")
     if($DryRun){return (New-KbResult -Command 'ingest' -Status 'dry-run' -State 'HEALTHY' -VaultPath $VaultPath -Changes $changes)}
@@ -28,7 +28,9 @@ function Invoke-KbIngest {
 
 function Invoke-KbArchive {
     param([Parameter(Mandatory)][string]$VaultPath,[Parameter(Mandatory)][string]$Project,[switch]$DryRun)
-    $source=Assert-KbPathWithin $VaultPath (Join-Path $VaultPath "20_Projects\$Project")
+    if($Project -notmatch '^[a-z0-9][a-z0-9-]{1,80}$'){throw 'Project must be a lowercase slug, not a path.'}
+    $source=Assert-KbPathWithin (Join-Path $VaultPath '20_Projects') (Join-Path $VaultPath "20_Projects\$Project")
+    Assert-KbTreeSafe $source
     if(-not (Test-Path -LiteralPath $source)){throw "Project not found: $source"}
     $dest=Assert-KbPathWithin $VaultPath (Join-Path $VaultPath "90_Archive\$((Get-Date).Year)\$Project")
     if(Test-Path -LiteralPath $dest){throw "Archive target exists: $dest"}
